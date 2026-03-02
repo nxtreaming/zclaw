@@ -8,6 +8,16 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - No unreleased changes yet.
 
+## [2.9.1] - 2026-03-02
+
+### Fixed
+- Hardened the `boot_ok` stabilization path by moving boot-counter persistence into shared boot-guard helpers and raising `BOOT_OK_TASK_STACK_SIZE` to reduce stack-pressure risk during startup finalization.
+- Fixed diagnostics verbose uptime formatting to avoid the 64-bit `printf` crash path on-device.
+
+### Tests
+- Added host coverage for boot-guard persistence behavior and `boot_ok` stack-size configuration.
+- Added host diagnostics tests covering verbose uptime formatting output.
+
 ## [2.9.0] - 2026-03-01
 
 ### Fixed
