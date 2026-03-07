@@ -88,6 +88,7 @@ run_host_tests() {
         ../../main/telegram_token.c \
         ../../main/telegram_chat_ids.c \
         ../../main/telegram_poll_policy.c \
+        ../../main/agent_commands.c \
         ../../main/agent.c \
         ../../main/gpio_policy.c \
         ../../main/tools_gpio.c \

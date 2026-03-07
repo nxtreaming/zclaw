@@ -1,4 +1,5 @@
 #include "agent.h"
+#include "agent_commands.h"
 #include "config.h"
 #include "llm.h"
 #include "tools.h"
@@ -182,11 +183,6 @@ static void send_response(const char *text, int64_t chat_id)
     queue_telegram_response(text, chat_id);
 }
 
-static bool is_whitespace_char(char c)
-{
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
 static const char *persona_name(agent_persona_t persona)
 {
     switch (persona) {
@@ -335,138 +331,6 @@ static const char *build_system_prompt(void)
     return s_system_prompt_buf;
 }
 
-static bool is_command(const char *message, const char *name)
-{
-    if (!message || !name || name[0] == '\0') {
-        return false;
-    }
-
-    while (*message && is_whitespace_char(*message)) {
-        message++;
-    }
-
-    if (*message != '/') {
-        return false;
-    }
-
-    size_t name_len = strlen(name);
-    const char *cursor = message + 1;
-    if (strncmp(cursor, name, name_len) != 0) {
-        return false;
-    }
-    cursor += name_len;
-
-    // Accept "/<name>", "/<name> payload", and "/<name>@bot payload".
-    if (*cursor == '\0' || is_whitespace_char(*cursor)) {
-        return true;
-    }
-    if (*cursor != '@') {
-        return false;
-    }
-    cursor++;
-    if (*cursor == '\0') {
-        return false;
-    }
-    while (*cursor && !is_whitespace_char(*cursor)) {
-        cursor++;
-    }
-
-    return true;
-}
-
-static const char *command_payload(const char *message, const char *name)
-{
-    const char *cursor;
-    size_t name_len;
-
-    if (!is_command(message, name)) {
-        return NULL;
-    }
-
-    while (*message && is_whitespace_char(*message)) {
-        message++;
-    }
-
-    cursor = message + 1; // Skip leading slash
-    name_len = strlen(name);
-    cursor += name_len;
-
-    if (*cursor == '@') {
-        cursor++;
-        while (*cursor && !is_whitespace_char(*cursor)) {
-            cursor++;
-        }
-    }
-
-    while (*cursor && is_whitespace_char(*cursor)) {
-        cursor++;
-    }
-
-    return cursor;
-}
-
-static bool is_diag_scope_token(const char *token)
-{
-    if (!token) {
-        return false;
-    }
-
-    return strcmp(token, "quick") == 0 ||
-           strcmp(token, "runtime") == 0 ||
-           strcmp(token, "memory") == 0 ||
-           strcmp(token, "rates") == 0 ||
-           strcmp(token, "time") == 0 ||
-           strcmp(token, "all") == 0;
-}
-
-static bool parse_diag_command_args(const char *message, cJSON *tool_input, char *error, size_t error_len)
-{
-    const char *payload = command_payload(message, "diag");
-    char payload_buf[128];
-    char *cursor;
-    bool verbose = false;
-    const char *scope = NULL;
-
-    if (!payload || payload[0] == '\0') {
-        return true;
-    }
-
-    if (strlen(payload) >= sizeof(payload_buf)) {
-        snprintf(error, error_len, "Error: /diag arguments too long");
-        return false;
-    }
-
-    snprintf(payload_buf, sizeof(payload_buf), "%s", payload);
-    cursor = strtok(payload_buf, " \t\r\n");
-    while (cursor) {
-        for (size_t i = 0; cursor[i] != '\0'; i++) {
-            cursor[i] = (char)tolower((unsigned char)cursor[i]);
-        }
-
-        if (strcmp(cursor, "verbose") == 0 || strcmp(cursor, "--verbose") == 0) {
-            verbose = true;
-        } else if (!scope && is_diag_scope_token(cursor)) {
-            scope = cursor;
-        } else {
-            snprintf(error, error_len,
-                     "Error: unknown /diag argument '%s' (use scope + optional verbose)",
-                     cursor);
-            return false;
-        }
-
-        cursor = strtok(NULL, " \t\r\n");
-    }
-
-    if (scope) {
-        cJSON_AddStringToObject(tool_input, "scope", scope);
-    }
-    if (verbose) {
-        cJSON_AddBoolToObject(tool_input, "verbose", true);
-    }
-
-    return true;
-}
-
 static void handle_diag_command(const char *user_message, int64_t chat_id, request_metrics_t *metrics)
 {
     char error[120] = {0};
@@ -480,7 +344,7 @@ static void handle_diag_command(const char *user_message, int64_t chat_id, reque
         return;
     }
 
-    if (!parse_diag_command_args(user_message, tool_input, error, sizeof(error))) {
+    if (!agent_parse_diag_command_args(user_message, tool_input, error, sizeof(error))) {
         send_response(error, chat_id);
         cJSON_Delete(tool_input);
         metrics_log_request(metrics, "diag_invalid_args");
@@ -505,32 +369,6 @@ static void handle_diag_command(const char *user_message, int64_t chat_id, reque
 
     send_response(s_tool_result_buf, chat_id);
     metrics_log_request(metrics, "diag_handled");
-}
-
-static bool is_slash_command(const char *message)
-{
-    if (!message) {
-        return false;
-    }
-
-    while (*message && is_whitespace_char(*message)) {
-        message++;
-    }
-
-    return *message == '/';
-}
-
-static bool is_cron_trigger_message(const char *message)
-{
-    if (!message) {
-        return false;
-    }
-
-    while (*message && is_whitespace_char(*message)) {
-        message++;
-    }
-
-    return strncmp(message, "[CRON ", 6) == 0;
 }
 
 static void handle_start_command(int64_t chat_id)
@@ -584,8 +422,8 @@ static void process_message(const char *user_message, int64_t reply_chat_id)
 {
     ESP_LOGI(TAG, "Processing: %s", user_message);
     int history_turn_start = s_history_len;
-    bool is_non_command_message = !is_slash_command(user_message);
-    bool is_cron_trigger = is_cron_trigger_message(user_message);
+    bool is_non_command_message = !agent_is_slash_command(user_message);
+    bool is_cron_trigger = agent_is_cron_trigger_message(user_message);
     bool telegram_polling_paused = false;
     request_metrics_t metrics = {
         .started_us = esp_timer_get_time(),
@@ -596,7 +434,7 @@ static void process_message(const char *user_message, int64_t reply_chat_id)
         .rounds = 0,
     };
 
-    if (is_command(user_message, "resume")) {
+    if (agent_is_command(user_message, "resume")) {
         if (!s_messages_paused) {
             send_response("zclaw is already active.", reply_chat_id);
             metrics_log_request(&metrics, "resume_noop");
@@ -608,13 +446,13 @@ static void process_message(const char *user_message, int64_t reply_chat_id)
         return;
     }
 
-    if (is_command(user_message, "settings")) {
+    if (agent_is_command(user_message, "settings")) {
         handle_settings_command(reply_chat_id);
         metrics_log_request(&metrics, "settings_handled");
         return;
     }
 
-    if (is_command(user_message, "diag")) {
+    if (agent_is_command(user_message, "diag")) {
         handle_diag_command(user_message, reply_chat_id, &metrics);
         return;
     }
@@ -625,20 +463,20 @@ static void process_message(const char *user_message, int64_t reply_chat_id)
         return;
     }
 
-    if (is_command(user_message, "help")) {
+    if (agent_is_command(user_message, "help")) {
         handle_start_command(reply_chat_id);
         metrics_log_request(&metrics, "help_handled");
         return;
     }
 
-    if (is_command(user_message, "stop")) {
+    if (agent_is_command(user_message, "stop")) {
         s_messages_paused = true;
         send_response("zclaw paused. I will ignore new messages until /resume.", reply_chat_id);
         metrics_log_request(&metrics, "paused");
         return;
     }
 
-    if (is_command(user_message, "start")) {
+    if (agent_is_command(user_message, "start")) {
         int64_t now_us = esp_timer_get_time();
         uint32_t since_last_start_ms = 0;
         if (s_last_start_response_us > 0 && now_us > s_last_start_response_us) {
